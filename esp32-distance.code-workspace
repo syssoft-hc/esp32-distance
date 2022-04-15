@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../teensy-gps"
+		},
+		{
+			"name": "esp32-distance",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

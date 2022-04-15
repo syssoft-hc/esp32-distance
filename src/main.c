@@ -5,10 +5,12 @@
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "esp_wifi.h"
-#include "esp_event_loop.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_err.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "time.h"
 
 #include "lwip/err.h"
@@ -28,10 +30,50 @@
 
 // ***** Behavior
 #define N_SAMPLES 3 // average of given number of measurements will be used
-#define SAMPLE_PERIOD_IN_SECS 2
+#define SAMPLE_PERIOD_IN_MSECS 500
 
 // ***** Globals
 const double sonicspeed = 340.0 * 100.0 / 1000.0 / 1000.0; // sonic speed in cm per usec
+
+// ***************************************************************************
+// LED PWM Configuration
+//
+// Based on sample code found in the ESP-IDF Programming Guide
+// (https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/ledc.html)
+// ***************************************************************************
+
+#define LEDC_TIMER              LEDC_TIMER_0
+#define LEDC_MODE               LEDC_LOW_SPEED_MODE
+#define LEDC_OUTPUT_IO          (LED) // Define the output GPIO
+#define LEDC_CHANNEL            LEDC_CHANNEL_0
+#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
+#define LEDC_DUTY               (4095) // Set duty to 50%. ((2 ** 13) - 1) * 50% = 4095
+#define LEDC_FREQUENCY          (5000) // Frequency in Hertz. Set frequency at 5 kHz
+
+static void ledc_init(void)
+{
+    // Prepare and then apply the LEDC PWM timer configuration
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_MODE,
+        .timer_num        = LEDC_TIMER,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 5 kHz
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    // Prepare and then apply the LEDC PWM channel configuration
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = LEDC_MODE,
+        .channel        = LEDC_CHANNEL,
+        .timer_sel      = LEDC_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = LEDC_OUTPUT_IO,
+        .duty           = 0, // Set duty to 0%
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+}
 
 // ***************************************************************************
 // Helper functions
@@ -90,19 +132,17 @@ void print_chip_info () {
     fflush(stdout);
 }
 
-void show_value ( gpio_num_t led, int active, int v ) {
-    // printf("Show value: ");
-    bool leading_blank = true;
-    for (int i=15; i>=0; i--) {
-        bool digit = (v >> i) & 0x1;
-        if (leading_blank & !digit) continue; else leading_blank = false;
-        // if (digit) printf("1"); else printf("0");
-        gpio_set_level(led, active);
-        sleep_ms(digit ? 400 : 100);
-        gpio_set_level(led, 1-active);
-        sleep_ms(200);
+void show_value ( int v ) {
+    uint duty_100 = (2<<13)-1; // 13 Bit are configured (LEDC_TIMER_13_BIT)
+    uint max_distance = 50; // Object beyond max_distance not shown, LED off
+    uint d_cycle = 0;
+
+    if (v < max_distance) {
+        float y = ((float) duty_100) / ((float) max_distance) * v;
+        d_cycle = duty_100 - ((uint) y);
     }
-    // printf("\n");
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, d_cycle));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
 }
 
 // ***************************************************************************
@@ -160,9 +200,9 @@ void task_check_distance ( void *params ) {
                 printf("----------: Distance change > 10mm: %f at time %d\n",distance,(int) now.tv_sec);
             }
             last_distance = distance;
-            show_value(LED,1,(int) distance);
+            show_value((int) distance);
         }
-        vTaskDelay(SAMPLE_PERIOD_IN_SECS * 1000 / portTICK_PERIOD_MS);
+        vTaskDelay(SAMPLE_PERIOD_IN_MSECS / portTICK_PERIOD_MS);
     }
 }
 
@@ -183,9 +223,11 @@ void app_main()
     gpio_pad_select_gpio(LED);
     gpio_set_direction(LED, GPIO_MODE_OUTPUT);
     
+    ledc_init();
+
     // Wait 2 secs for console to connect
     sleep_ms(2000);
-    printf("Cistern Water Level ...!\n");
+    printf("Measuring distance with sonic device HC-SR04 ...!\n");
     print_chip_info();  
     printf("sonic speed is %f cm/usec\n",sonicspeed);
 
